@@ -1,0 +1,15 @@
+1: Hello
+2: r u there???
+3: ni zai ma
+4: from Kafka streams
+5: Updates should
+6: be sent to
+7: Kafka when
+8: Kafka is
+9: brought
+10. back on
+11: ni hao?
+12: why are you running?
+13: im getting blocked
+14: with this ticket
+15: b1 b2 b3
