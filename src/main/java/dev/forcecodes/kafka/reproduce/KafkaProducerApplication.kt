@@ -47,7 +47,7 @@ private const val DEFAULT_TOPIC_LOOKUP_TIMEOUT_MS = 5000
 
 private val deadLetterQueue: Queue<ProducerRecord<String?, String>> = LinkedBlockingDeque()
 
-private fun <T>  Queue<T>.offerIfNotExist(data: T) = !contains(data) then offer(data)
+private fun <T> Queue<T>.offerIfNotExist(data: T) = !contains(data) then offer(data)
 
 fun main(args: Array<String>) {
   kafkaProducer(args)
