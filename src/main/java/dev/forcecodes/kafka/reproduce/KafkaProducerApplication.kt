@@ -1,6 +1,7 @@
 package dev.forcecodes.kafka.reproduce
 
 import org.apache.kafka.clients.admin.AdminClient
+import org.apache.kafka.clients.admin.KafkaAdminClient
 import org.apache.kafka.clients.admin.ListTopicsOptions
 import org.apache.kafka.clients.admin.TopicListing
 import org.apache.kafka.clients.producer.Callback
@@ -8,16 +9,18 @@ import org.apache.kafka.clients.producer.KafkaProducer
 import org.apache.kafka.clients.producer.Producer
 import org.apache.kafka.clients.producer.ProducerRecord
 import org.apache.kafka.clients.producer.RecordMetadata
+import org.apache.kafka.common.errors.TimeoutException
 import java.io.FileInputStream
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Paths
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
-import java.util.*
+import java.util.Properties
+import java.util.Queue
 import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
 import java.util.concurrent.LinkedBlockingDeque
-import java.util.function.Consumer
 import kotlin.streams.toList
 
 /**
@@ -30,9 +33,9 @@ import kotlin.streams.toList
  * If the message fails to be published (e.g., due to network issues or broker unavailability), the producer catches the exception.
  *
  * **DLQ Handling:**
- * The producer sends the failed message to a dedicated DLQ topic.
- * The DLQ topic should have the same key and value as the original message (no additional wrapping).
- * Additionally, include metadata in Kafka headers (e.g., original topic name, partition, offset, timestamp, and error details).
+ * The producer sends the failed message to a dedicated DLQ (LinkedBlockingDeque). The DLQ acts as a cache and persists across the application lifecycle.
+ * It should have the same key and value as the original message (without any additional wrapping).
+ * Additionally, include metadata in Kafka headers (e.g., original topic name, partition, offset, and timestamp).
  *
  * **Retrying from DLQ:**
  * The application periodically checks the DLQ for failed messages.
@@ -45,6 +48,8 @@ import kotlin.streams.toList
 private const val DEFAULT_TOPIC_LOOKUP_TIMEOUT_MS = 5000
 
 private val deadLetterQueue: Queue<ProducerRecord<String?, String>> = LinkedBlockingDeque()
+
+private fun <T>  Queue<T>.offerIfNotExist(data: T) = !contains(data) then offer(data)
 
 fun main(args: Array<String>) {
   kafkaProducer(args)
@@ -60,6 +65,15 @@ fun loadProperties(fileName: String?): Properties {
 }
 
 private fun kafkaProducer(args: Array<String>) {
+  check(args.size == 3) {
+    log(
+      """Arguments should contain the following:
+         1. The config file for Kafka producer configs
+         2. Text file containing the data to be sent to the topic
+         3. The topic name
+      """
+    )
+  }
 
   val props = loadProperties("config/dev.properties")
   val topic = args[2]
@@ -80,9 +94,10 @@ private fun kafkaProducer(args: Array<String>) {
               )
               deadLetterQueue.remove(record)
             } else {
-              log("${e.message} value: ${record.value()}")
-              if (!deadLetterQueue.contains(record)) {
-                deadLetterQueue.offer(record)
+              // potential cause for this exception would be kafka broker is not running
+              if (e is TimeoutException) {
+                log("${e.message} value: ${record.value()}")
+                deadLetterQueue.offerIfNotExist(record)
               }
             }
           }
@@ -91,14 +106,16 @@ private fun kafkaProducer(args: Array<String>) {
         }
       }
 
-    processRecordsFromDlq { topics ->
+    // process remaining records in the DLQ
+    val client = KafkaAdminClient.create(props)
+    processRecordsFromDlq(client) { topics ->
       if (topics.isEmpty()) {
         return@processRecordsFromDlq
       }
       log("Kafka server is up and running with topics: $topics")
       while (deadLetterQueue.isNotEmpty()) {
         val record = deadLetterQueue.poll()
-        trySend(producer, record, true) { _, e ->
+        trySend(producer, record, true) { metadata, e ->
           if (e == null) {
             log(
               "Successfully re-sent record with " +
@@ -112,41 +129,53 @@ private fun kafkaProducer(args: Array<String>) {
 }
 
 fun createRecord(event: String, topic: String): ProducerRecord<String?, String> {
-  val parts = event.split(":".toRegex()).dropLastWhile { it.isEmpty() }.toTypedArray()
+  val parts = event.split("\\.".toRegex()).dropLastWhile { it.isEmpty() }.toTypedArray()
   return if (parts.size > 1) {
     ProducerRecord(topic, parts[0], parts[1].trim())
   } else {
-    ProducerRecord(topic, null, parts[0])
+    ProducerRecord(topic, null, event)
   }
 }
 
-private fun processRecordsFromDlq(onReady: Consumer<List<String>>) {
+private fun processRecordsFromDlq(adminClient: AdminClient, onReady: (List<String>) -> Unit) {
   if (deadLetterQueue.isEmpty()) {
     log("Dead letter queue is empty. Nothing to re-send!")
     return
   }
+  log(
+    "There are at least ${deadLetterQueue.size} ${
+      (deadLetterQueue.size > 1).then("records") ?: "record"} " +
+        "in the DLQ. Will attempt to schedule sending all records to the topic once connected to Kafka",
+  )
+  adminClient.isKafkaAvailable(onReady = onReady)
+}
 
-  val properties = Properties()
-  properties["bootstrap.servers"] = "localhost:29092"
-
-  val client = AdminClient.create(properties)
-  val options = ListTopicsOptions().timeoutMs(DEFAULT_TOPIC_LOOKUP_TIMEOUT_MS)
-
+private fun AdminClient.isKafkaAvailable(
+  timeout: Int = DEFAULT_TOPIC_LOOKUP_TIMEOUT_MS,
+  topicsOptions: ListTopicsOptions = ListTopicsOptions().timeoutMs(timeout),
+  failFast: Boolean = false,
+  onReady: (List<String>) -> Unit
+) {
   while (true) {
     try {
-      val kafkaFuture = client.listTopics(options).listings()
+      val kafkaFuture = listTopics(topicsOptions).listings()
       val collection = kafkaFuture.get()
       if (collection.isNotEmpty()) {
         val topics = collection.stream().map(TopicListing::name)
-          .filter { name -> !name.startsWith("_") }.toList()
-        onReady.accept(topics)
+          .filter { name -> !name.startsWith("_") }
+          .toList()
+        onReady(topics)
         break
       }
     } catch (e: Exception) {
       when (e) {
-        is ExecutionException, is InterruptedException -> {
+        is ExecutionException,
+        is InterruptedException -> {
           log("Kafka is not available, timed out after ms: $DEFAULT_TOPIC_LOOKUP_TIMEOUT_MS")
-          onReady.accept(emptyList())
+          if (failFast) {
+            onReady(emptyList())
+            break
+          }
         }
       }
     }
@@ -167,3 +196,5 @@ private fun trySend(
 
 private val PATTERN = DateTimeFormatter.ofPattern("HH:mm:ss")
 private fun log(message: String) = println("${LocalTime.now().format(PATTERN)} $message")
+
+infix fun <T> Boolean.then(param: T): T? = if (this) param else null
