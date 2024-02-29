@@ -10,12 +10,11 @@ import org.apache.kafka.clients.producer.Producer
 import org.apache.kafka.clients.producer.ProducerRecord
 import org.apache.kafka.clients.producer.RecordMetadata
 import org.apache.kafka.common.errors.TimeoutException
+import org.apache.logging.log4j.kotlin.logger
 import java.io.FileInputStream
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Paths
-import java.time.LocalTime
-import java.time.format.DateTimeFormatter
 import java.util.Properties
 import java.util.Queue
 import java.util.concurrent.ExecutionException
@@ -114,7 +113,7 @@ private fun kafkaProducer(args: Array<String>) {
       log("Kafka server is up and running with topics: $topics")
       while (deadLetterQueue.isNotEmpty()) {
         val record = deadLetterQueue.poll()
-        trySend(producer, record, true) { metadata, e ->
+        trySend(producer, record, true) { _, e ->
           if (e == null) {
             log(
               "Successfully re-sent record with " +
@@ -193,7 +192,7 @@ private fun trySend(
   return producer.send(record, callback).get()
 }
 
-private val PATTERN = DateTimeFormatter.ofPattern("HH:mm:ss")
-private fun log(message: String) = println("${LocalTime.now().format(PATTERN)} $message")
+val LOGGER = logger("KafkaProducerApplication")
+private fun log(message: String) = LOGGER.info(message) //println("${LocalTime.now().format(PATTERN)} $message")
 
 infix fun <T> Boolean.then(param: T): T? = if (this) param else null
