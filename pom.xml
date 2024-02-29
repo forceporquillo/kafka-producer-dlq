@@ -16,6 +16,7 @@
     <kafka.version>3.5.1</kafka.version>
     <log4j2.version>2.23.0</log4j2.version>
     <log4j2.kotlin.version>1.4.0</log4j2.kotlin.version>
+    <main.class>dev.forcecodes.kafka.reproduce.KafkaProducerApplicationKt</main.class>
   </properties>
 
   <dependencies>
@@ -59,6 +60,30 @@
 
   <build>
     <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-assembly-plugin</artifactId>
+        <configuration>
+          <descriptorRefs>
+            <descriptorRef>jar-with-dependencies</descriptorRef>
+          </descriptorRefs>
+          <archive>
+            <manifest>
+              <addClasspath>true</addClasspath>
+              <mainClass>${main.class}</mainClass>
+            </manifest>
+          </archive>
+        </configuration>
+        <executions>
+          <execution>
+            <id>assemble-all</id>
+            <phase>package</phase>
+            <goals>
+              <goal>single</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
       <plugin>
         <groupId>org.jetbrains.kotlin</groupId>
         <artifactId>kotlin-maven-plugin</artifactId>
