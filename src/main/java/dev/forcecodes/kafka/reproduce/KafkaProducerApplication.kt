@@ -193,6 +193,6 @@ private fun trySend(
 }
 
 val LOGGER = logger("KafkaProducerApplication")
-private fun log(message: String) = LOGGER.info(message) //println("${LocalTime.now().format(PATTERN)} $message")
+private fun log(message: String) = LOGGER.info(message)
 
 infix fun <T> Boolean.then(param: T): T? = if (this) param else null
