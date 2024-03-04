@@ -4,7 +4,8 @@ import org.apache.kafka.clients.producer.KafkaProducer
 import org.apache.kafka.clients.producer.ProducerRecord
 import org.apache.kafka.common.errors.TimeoutException
 import org.apache.logging.log4j.kotlin.logger
-import java.util.*
+import java.util.Locale
+import java.util.Properties
 import java.util.concurrent.BlockingQueue
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ExecutorService
