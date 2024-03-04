@@ -1,25 +1,15 @@
 package dev.forcecodes.kafka.reproduce
 
-import org.apache.kafka.clients.admin.AdminClient
-import org.apache.kafka.clients.admin.KafkaAdminClient
-import org.apache.kafka.clients.admin.ListTopicsOptions
-import org.apache.kafka.clients.admin.TopicListing
-import org.apache.kafka.clients.producer.Callback
 import org.apache.kafka.clients.producer.KafkaProducer
-import org.apache.kafka.clients.producer.Producer
 import org.apache.kafka.clients.producer.ProducerRecord
-import org.apache.kafka.clients.producer.RecordMetadata
-import org.apache.kafka.common.errors.TimeoutException
 import org.apache.logging.log4j.kotlin.logger
 import java.io.FileInputStream
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Paths
 import java.util.Properties
-import java.util.Queue
+import java.util.UUID
 import java.util.concurrent.ExecutionException
-import java.util.concurrent.LinkedBlockingDeque
-import kotlin.streams.toList
 
 /**
  * A sample simulation where a [KafkaProducer] encounters an error while sending a message.
@@ -42,157 +32,85 @@ import kotlin.streams.toList
  *
  * @author Aljan Porquillo
  */
+object KafkaProducerApplication {
 
-private const val DEFAULT_TOPIC_LOOKUP_TIMEOUT_MS = 5000
+  private val logger = logger()
 
-private val deadLetterQueue: Queue<ProducerRecord<String?, String>> = LinkedBlockingDeque()
+  @Throws(IOException::class)
+  fun loadProperties(fileName: String?): Properties {
+    val envProps = Properties()
+    val input = fileName?.let { FileInputStream(it) }
+    envProps.load(input)
+    input?.close()
+    return envProps
+  }
 
-private fun <T> Queue<T>.offerIfNotExist(data: T) = !contains(data) then offer(data)
-
-fun main(args: Array<String>) {
-  kafkaProducer(args)
-}
-
-@Throws(IOException::class)
-fun loadProperties(fileName: String?): Properties {
-  val envProps = Properties()
-  val input = fileName?.let { FileInputStream(it) }
-  envProps.load(input)
-  input?.close()
-  return envProps
-}
-
-private fun kafkaProducer(args: Array<String>) {
-  check(args.size == 3) {
-    log(
-      """Arguments should contain the following:
+  private fun kafkaProducer(args: Array<String>) {
+    check(args.size == 3) {
+      logger.warn(
+        """Arguments should contain the following:
          1. The config file for Kafka producer configs
          2. Text file containing the data to be sent to the topic
          3. The topic name
       """
-    )
-  }
+      )
+    }
 
-  val props = loadProperties("config/dev.properties")
-  val topic = args[2]
+    val props = loadProperties("config/dev.properties")
+    val topic = args[2]
 
-  KafkaProducer<String, String>(props).use { producer ->
+    val producer = KafkaProducer<String, MockData>(props)
+    val retryManager = ProducerRecordRetryManager(props, producer, topic)
+
+    retryManager.setCallback {
+      logger.debug("Callback: $it")
+    }
+
     val linesToProduce = Files.readAllLines(Paths.get(args[1]))
     linesToProduce.stream().filter { l: String -> l.trim { it <= ' ' }.isNotEmpty() }
-      .map { createRecord(it, topic) }
+      .map { it.toRecord(topic) }
       .forEach { record ->
-        try {
-          trySend(
-            producer, record, false
-          ) { recordMetadata: RecordMetadata, e: Exception? ->
-            if (e == null) {
-              log(
-                "Record written: ${record.value()} to offset" +
-                    " ${recordMetadata.offset()} timestamp ${recordMetadata.timestamp()}"
-              )
-              deadLetterQueue.remove(record)
-            } else {
-              // potential cause for this exception would be kafka broker is not running
-              if (e is TimeoutException) {
-                log("${e.message} value: ${record.value()}")
-                deadLetterQueue.offerIfNotExist(record)
+        logger.debug("Record to send $record")
+
+        val proceedToSend = retryManager.tryNotifyPendingRecords(record) {
+          val value = UUID.randomUUID().toString()
+          it.append = value
+          logger.debug("NotifyPending: Consuming correlation updater callback : $it with update message $value")
+        }
+
+        if (proceedToSend) {
+          try {
+            producer.send(record) { recordMetadata, exception ->
+              if (exception == null) {
+                logger.debug("Record written: ${record.value()} to offset ${recordMetadata.offset()} timestamp ${recordMetadata.timestamp()}")
+              } else {
+                // potential cause for this exception would be kafka broker is not running
+                retryManager.queueFailedRecord(exception, record) {
+                  val value = UUID.randomUUID().toString()
+                  it.append = value
+                  logger.debug("Consuming correlation updater callback: $it with update message $value")
+                }
               }
-            }
+            }.get()
+          } catch (e: ExecutionException) {
+            e.message?.let { logger.error(it) }
           }
-        } catch (ignored: InterruptedException) {
-        } catch (ignored: ExecutionException) {
         }
       }
+  }
 
-    // process remaining records in the DLQ
-    val client = KafkaAdminClient.create(props)
-    processRecordsFromDlq(client) { topics ->
-      if (topics.isEmpty()) {
-        return@processRecordsFromDlq
-      }
-      log("Kafka server is up and running with topics: $topics")
-      while (deadLetterQueue.isNotEmpty()) {
-        val record = deadLetterQueue.poll()
-        trySend(producer, record, true) { _, e ->
-          if (e == null) {
-            log(
-              "Successfully re-sent record with " +
-                  "key=${record.key()} value=${record.value()} to topic"
-            )
-          }
-        }
-      }
+  private fun String.toRecord(topic: String): ProducerRecord<String, MockData> {
+    val parts = split("\\.".toRegex()).dropLastWhile { it.isEmpty() }.toTypedArray()
+    return if (parts.size > 1) {
+      ProducerRecord(topic, parts[0], MockData(parts[1].trim()))
+    } else {
+      ProducerRecord(topic, UUID.randomUUID().toString(), MockData(this))
     }
   }
-}
 
-fun createRecord(event: String, topic: String): ProducerRecord<String?, String> {
-  val parts = event.split("\\.".toRegex()).dropLastWhile { it.isEmpty() }.toTypedArray()
-  return if (parts.size > 1) {
-    ProducerRecord(topic, parts[0], parts[1].trim())
-  } else {
-    ProducerRecord(topic, null, event)
+  @JvmStatic
+  fun main(args: Array<String>) {
+    kafkaProducer(args)
+    Thread.currentThread().join()
   }
 }
-
-private fun processRecordsFromDlq(adminClient: AdminClient, onReady: (List<String>) -> Unit) {
-  if (deadLetterQueue.isEmpty()) {
-    log("Dead letter queue is empty. Nothing to re-send!")
-    return
-  }
-  log(
-    "There are at least ${deadLetterQueue.size} ${
-      (deadLetterQueue.size > 1).then("records") ?: "record"} " +
-        "in the DLQ. Will attempt to schedule sending all records to the topic once connected to Kafka",
-  )
-  adminClient.isKafkaAvailable(onReady = onReady)
-}
-
-private fun AdminClient.isKafkaAvailable(
-  timeout: Int = DEFAULT_TOPIC_LOOKUP_TIMEOUT_MS,
-  topicsOptions: ListTopicsOptions = ListTopicsOptions().timeoutMs(timeout),
-  failFast: Boolean = false,
-  onReady: (List<String>) -> Unit
-) {
-  while (true) {
-    try {
-      val kafkaFuture = listTopics(topicsOptions).listings()
-      val collection = kafkaFuture.get()
-      if (collection.isNotEmpty()) {
-        val topics = collection.stream().map(TopicListing::name)
-          .filter { name -> !name.startsWith("_") }
-          .toList()
-        onReady(topics)
-        break
-      }
-    } catch (e: Exception) {
-      when (e) {
-        is ExecutionException,
-        is InterruptedException -> {
-          log("Kafka is not available, timed out after ms: $DEFAULT_TOPIC_LOOKUP_TIMEOUT_MS")
-          if (failFast) {
-            onReady(emptyList())
-            break
-          }
-        }
-      }
-    }
-  }
-}
-
-private fun trySend(
-  producer: Producer<String, String>,
-  record: ProducerRecord<String?, String>,
-  log: Boolean,
-  callback: Callback
-): RecordMetadata? {
-  if (log) {
-    log("Attempting to re-send record with key=${record.key()} value=${record.value()} to topic")
-  }
-  return producer.send(record, callback).get()
-}
-
-val LOGGER = logger("KafkaProducerApplication")
-private fun log(message: String) = LOGGER.info(message)
-
-infix fun <T> Boolean.then(param: T): T? = if (this) param else null
