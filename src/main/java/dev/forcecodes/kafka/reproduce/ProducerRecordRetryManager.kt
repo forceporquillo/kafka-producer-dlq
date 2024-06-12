@@ -13,6 +13,15 @@ import java.util.concurrent.Executors
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.ThreadFactory
 
+fun String.newDaemonThreadFactory(): ThreadFactory {
+  val topic = lowercase(Locale.getDefault()).replace("-topic", "")
+  return ThreadFactory { runnable ->
+    val thread = Executors.defaultThreadFactory().newThread(runnable)
+    thread.setName("retry-$topic-thread")
+    thread
+  }
+}
+
 /**
  * This class manages the retry logic for a
  * [KafkaProducer][org.apache.kafka.clients.producer.KafkaProducer] when sending a
@@ -24,38 +33,20 @@ import java.util.concurrent.ThreadFactory
  * @author Aljan Porquillo
  */
 class ProducerRecordRetryManager<O>(
-  properties: Properties?,
-  kafkaProducer: KafkaProducer<String, O>,
-  topicName: String
+  properties: Properties,
+  private val kafkaProducer: KafkaProducer<String, O>,
+  private val topicName: String,
+  private val adminClient: KafkaAdminClient = KafkaAdminClient.getInstance(properties),
+  private val recordQueue: BlockingQueue<ProducerRecord<String, O>> = LinkedBlockingQueue(),
+  private val threadFactory: ThreadFactory = topicName.newDaemonThreadFactory(),
+  private val retryTaskExecutor: ExecutorService = Executors.newSingleThreadExecutor(threadFactory)
 ) {
 
   private val logger = logger()
 
-  private val adminClient: KafkaAdminClient
-  private val kafkaProducer: KafkaProducer<String, O>
-  private val topicName: String
-  private val recordQueue: BlockingQueue<ProducerRecord<String, O>>
-  private val retryTaskExecutor: ExecutorService
   private var callback: KafkaDispatcherCallback<O>? = null
   private var hasOngoingRetry = false
   private var retryTaskFuture: CompletableFuture<Void>? = null
-
-  init {
-    this.adminClient = KafkaAdminClient.getInstance(properties!!)
-    this.kafkaProducer = kafkaProducer
-    this.topicName = topicName
-    this.recordQueue = LinkedBlockingQueue()
-    this.retryTaskExecutor = Executors.newSingleThreadExecutor(createHandlerThreadFactory())
-  }
-
-  private fun createHandlerThreadFactory(): ThreadFactory {
-    val topic = topicName.lowercase(Locale.getDefault()).replace("-topic", "")
-    return ThreadFactory { runnable ->
-      val thread = Executors.defaultThreadFactory().newThread(runnable)
-      thread.setName("retry-$topic-thread")
-      thread
-    }
-  }
 
   fun setCallback(callback: KafkaDispatcherCallback<O>) {
     this.callback = callback

@@ -1,3 +1,5 @@
+@file:Suppress("UNUSED")
+
 package dev.forcecodes.kafka.reproduce
 
 import org.apache.kafka.clients.admin.AdminClient
@@ -9,17 +11,14 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutionException
 import java.util.stream.Collectors
 
-class KafkaAdminClient private constructor(config: Properties, private val timeout: Int) {
+class KafkaAdminClient private constructor(
+  config: Properties,
+  private val timeout: Int,
+  private val client: AdminClient = AdminClient.create(config),
+  private val topicsOptions: ListTopicsOptions = ListTopicsOptions().timeoutMs(timeout)
+) {
 
   private val logger = logger()
-
-  private val client: AdminClient
-  private val topicsOptions: ListTopicsOptions
-
-  init {
-    client = AdminClient.create(config)
-    topicsOptions = ListTopicsOptions().timeoutMs(timeout)
-  }
 
   fun isTopicsAvailable(logError: Boolean, listener: KafkaReadyListener) {
     while (true) {

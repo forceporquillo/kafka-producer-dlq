@@ -7,8 +7,7 @@ import java.io.FileInputStream
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Paths
-import java.util.Properties
-import java.util.UUID
+import java.util.*
 import java.util.concurrent.ExecutionException
 
 /**
@@ -45,6 +44,23 @@ object KafkaProducerApplication {
     return envProps
   }
 
+  private fun KafkaProducer<String, MockData>.trySend(
+    record: ProducerRecord<String, MockData>,
+    onError: (Exception) -> Unit
+  ) {
+    try {
+      send(record) { recordMetadata, exception ->
+        if (exception == null) {
+          logger.debug("Record written: ${record.value()} to offset ${recordMetadata.offset()} timestamp ${recordMetadata.timestamp()}")
+        } else {
+          onError.invoke(exception)
+        }
+      }.get()
+    } catch (e: ExecutionException) {
+      e.message?.let { logger.error(it) }
+    }
+  }
+
   private fun kafkaProducer(args: Array<String>) {
     check(args.size == 3) {
       logger.warn(
@@ -79,21 +95,13 @@ object KafkaProducerApplication {
         }
 
         if (proceedToSend) {
-          try {
-            producer.send(record) { recordMetadata, exception ->
-              if (exception == null) {
-                logger.debug("Record written: ${record.value()} to offset ${recordMetadata.offset()} timestamp ${recordMetadata.timestamp()}")
-              } else {
-                // potential cause for this exception would be kafka broker is not running
-                retryManager.queueFailedRecord(exception, record) {
-                  val value = UUID.randomUUID().toString()
-                  it.append = value
-                  logger.debug("Consuming correlation updater callback: $it with update message $value")
-                }
-              }
-            }.get()
-          } catch (e: ExecutionException) {
-            e.message?.let { logger.error(it) }
+          producer.trySend(record) { exception ->
+            // potential cause for this exception would be kafka broker is not running
+            retryManager.queueFailedRecord(exception, record) {
+              val value = UUID.randomUUID().toString()
+              it.append = value
+              logger.debug("Consuming correlation updater callback: $it with update message $value")
+            }
           }
         }
       }
