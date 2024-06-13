@@ -4,7 +4,6 @@ import org.apache.kafka.clients.consumer.internals.NoAvailableBrokersException
 import org.apache.kafka.clients.producer.KafkaProducer
 import org.apache.kafka.clients.producer.ProducerRecord
 import org.apache.kafka.common.errors.TimeoutException
-import org.apache.kafka.common.protocol.types.Field.Str
 import org.apache.logging.log4j.kotlin.logger
 import java.util.*
 import java.util.concurrent.*
@@ -69,11 +68,11 @@ class ProducerRecordRetryManager<O>(
     }
   }
 
-  fun setDispatchListener(dispatchListener: () -> Unit) {
+  fun setCompleteListener(dispatchListener: () -> Unit) {
     this.internalDispatcherCallback = dispatchListener
   }
 
-  fun setCallback(callback: KafkaDispatcherCallback<O>) {
+  fun setDispatcherCallback(callback: KafkaDispatcherCallback<O>) {
     this.callback = callback
   }
 

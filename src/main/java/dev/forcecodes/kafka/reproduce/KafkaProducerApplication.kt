@@ -2,13 +2,13 @@ package dev.forcecodes.kafka.reproduce
 
 import org.apache.kafka.clients.producer.KafkaProducer
 import org.apache.kafka.clients.producer.ProducerRecord
+import org.apache.kafka.clients.producer.RecordMetadata
 import org.apache.logging.log4j.kotlin.logger
 import java.io.FileInputStream
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Paths
-import java.util.Properties
-import java.util.UUID
+import java.util.*
 import java.util.concurrent.ExecutionException
 import kotlin.system.exitProcess
 
@@ -35,104 +35,105 @@ import kotlin.system.exitProcess
  */
 object KafkaProducerApplication {
 
-  private val logger = logger()
+	private val logger = logger<KafkaProducerApplication>()
 
-  @Throws(IOException::class)
-  fun loadProperties(fileName: String?): Properties {
-    val envProps = Properties()
-    val input = fileName?.let { FileInputStream(it) }
-    envProps.load(input)
-    input?.close()
-    return envProps
-  }
+	@Throws(IOException::class)
+	fun loadProperties(fileName: String?): Properties {
+		val envProps = Properties()
+		val input = fileName?.let { FileInputStream(it) }
+		envProps.load(input)
+		input?.close()
+		return envProps
+	}
 
-  private fun KafkaProducer<String, RecordData>.trySend(
-    record: ProducerRecord<String, RecordData>,
-    onError: (Exception) -> Unit
-  ) {
-    try {
-      send(record) { recordMetadata, exception ->
-        if (exception == null) {
-          logger.debug("Record written: ${record.value()} to offset ${recordMetadata.offset()} timestamp ${recordMetadata.timestamp()}")
-        } else {
-          onError.invoke(exception)
-        }
-      }.get()
-    } catch (e: ExecutionException) {
-      e.message?.let { logger.error(it) }
-    }
-  }
+	private fun KafkaProducer<String, RecordData>.trySend(
+		record: ProducerRecord<String, RecordData>,
+		onSuccess: (RecordMetadata) -> Unit,
+		onError: (Exception) -> Unit
+	) {
+		try {
+			send(record) { recordMetadata, exception ->
+				if (exception == null) {
+					onSuccess.invoke(recordMetadata)
+				} else {
+					onError.invoke(exception)
+				}
+			}.get()
+		} catch (e: ExecutionException) {
+			e.message?.let { logger.error(it) }
+		}
+	}
 
-  private fun kafkaProducer(args: Array<String>) {
-    check(args.size == 3) {
-      logger.warn(
-        """Arguments should contain the following:
+	private fun kafkaProducer(args: Array<String>) {
+		check(args.size == 3) {
+			logger.warn(
+				"""Arguments should contain the following:
          1. The config file for Kafka producer configs
          2. Text file containing the data to be sent to the topic
          3. The topic name
       """
-      )
-    }
+			)
+		}
 
-    val props = loadProperties(args[0])
-    val topic = args[2]
+		val props = loadProperties(args[0])
+		val topic = args[2]
 
-    val producer = KafkaProducer<String, RecordData>(props)
-    val retryManager = ProducerRecordRetryManager(props, producer, topic)
+		val producer = KafkaProducer<String, RecordData>(props)
+		val retryManager = ProducerRecordRetryManager(props, producer, topic)
 
-    logger.debug("properties: $props")
-    logger.debug("topic: $topic")
+		logger.debug("properties: $props")
+		logger.debug("topic: $topic")
 
-    retryManager.setDispatchListener {
-      logger.debug("All records has been successfully re-send to topic, closing program...")
-      exitProcess(1)
-    }
+		val exitProcess: () -> Unit = {
+			logger.debug("All records has been successfully sent to $topic, closing program...")
+			exitProcess(1)
+		}
 
-    retryManager.setCallback {
-      logger.debug("Callback: $it")
-    }
+		retryManager.setCompleteListener { exitProcess() }
+		retryManager.setDispatcherCallback { logger.debug("Callback state: ${it.state()}: $it") }
 
-    val linesToProduce = Files.readAllLines(Paths.get(args[1]))
-    linesToProduce.stream().filter { l: String -> l.trim { it <= ' ' }.isNotEmpty() }
-      .map { it.toRecord(topic) }
-      .forEach { record ->
-        logger.debug("Record to send $record")
+		val idUpdater = EventCorrelationIdUpdater<RecordData> { recordData ->
+			logger.debug("Old correlation id ${recordData.correlationId}")
+			val correlationId = UUID.randomUUID().toString()
+			recordData.correlationId = correlationId
+			logger.debug("New correlation id $correlationId")
+			logger.debug("Consuming correlation updater callback : $recordData with update message $correlationId")
+		}
 
-        val proceedToSend = retryManager.tryNotifyPendingRecords(record) {
-          onUpdateCorrelationId(record.value(), "NotifyPendingRecords")
-        }
+		val linesToProduce = Files.readAllLines(Paths.get(args[1]))
+		linesToProduce.stream().filter { l: String -> l.trim { it <= ' ' }.isNotEmpty() }
+			.map { it.toRecord(topic) }
+			.forEach { record ->
+				logger.debug("Record to send $record")
 
-        if (proceedToSend) {
-          producer.trySend(record) { exception ->
-            // potential cause for this exception would be kafka broker is not running
-            retryManager.queueFailedRecord(exception, record) {
-              onUpdateCorrelationId(record.value(), "FailedRecords")
-            }
-          }
-        }
-      }
-  }
+				val proceedToSend = retryManager.tryNotifyPendingRecords(record, idUpdater)
 
-  private fun onUpdateCorrelationId(recordData: RecordData, callSite: String) {
-    logger.debug("Old correlation id ${recordData.correlationId}")
-    val correlationId = UUID.randomUUID().toString()
-    recordData.correlationId = correlationId
-    logger.debug("New correlation id $correlationId")
-    logger.debug("$callSite: Consuming correlation updater callback : $recordData with update message $correlationId")
-  }
+				if (proceedToSend) {
+					producer.trySend(
+						record,
+						onSuccess = { metadata ->
+							logger.debug("Record written: ${record.value()} to offset ${metadata.offset()} timestamp ${metadata.timestamp()}")
+						},
+						onError = { exception ->
+							// potential cause for this exception would be kafka broker is not running
+							retryManager.queueFailedRecord(exception, record, idUpdater)
+						})
+				}
+			}
+	}
 
-  private fun String.toRecord(topic: String): ProducerRecord<String, RecordData> {
-    val parts = split("\\.".toRegex()).dropLastWhile { it.isEmpty() }.toTypedArray()
-    val id = UUID.randomUUID().toString()
-    return if (parts.size > 1) {
-      ProducerRecord(topic, parts[0], RecordData(parts[1].trim(), correlationId = id))
-    } else {
-      ProducerRecord(topic, id, RecordData(this, correlationId = id))
-    }
-  }
+	private fun String.toRecord(topic: String): ProducerRecord<String, RecordData> {
+		val parts = split("\\.".toRegex()).dropLastWhile { it.isEmpty() }.toTypedArray()
+		val id = UUID.randomUUID().toString()
+		return if (parts.size > 1) {
+			ProducerRecord(topic, parts[0], RecordData(parts[1].trim(), correlationId = id))
+		} else {
+			ProducerRecord(topic, id, RecordData(this, correlationId = id))
+		}
+	}
 
-  @JvmStatic
-  fun main(args: Array<String>) {
-    kafkaProducer(args)
-  }
+	@JvmStatic
+	fun main(args: Array<String>) {
+		kafkaProducer(args)
+	}
 }
