@@ -5,20 +5,25 @@ import org.apache.kafka.clients.producer.KafkaProducer
 import org.apache.kafka.clients.producer.ProducerRecord
 import org.apache.kafka.common.errors.TimeoutException
 import org.apache.logging.log4j.kotlin.logger
-import java.util.*
-import java.util.concurrent.*
+import java.util.Locale
+import java.util.Properties
+import java.util.concurrent.BlockingQueue
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ThreadFactory
 
 fun String.toKafkaDaemonThreadFactory(): ThreadFactory {
-  val topic = lowercase(Locale.getDefault()).replace("-topic", "")
-  return ThreadFactory { runnable ->
-    val thread = Executors.defaultThreadFactory().newThread(runnable)
-    thread.setName("retry-$topic-thread")
-    thread
-  }
+	val topic = lowercase(Locale.getDefault()).replace("-topic", "")
+	return ThreadFactory { runnable ->
+		val thread = Executors.defaultThreadFactory().newThread(runnable)
+		thread.apply { setName("retry-$topic-thread") }
+	}
 }
 
 fun <O> Properties.newBlockingMechanism(
-  capacity: String = getOrDefault("queueCapacity", Int.MAX_VALUE.toString()) as String
+	capacity: String = getOrDefault("queueCapacity", Int.MAX_VALUE.toString()) as String
 ): BlockingQueue<O> = LinkedBlockingQueue(capacity.toInt())
 
 fun ThreadFactory.singleThreadExecutor(): ExecutorService = Executors.newSingleThreadExecutor(this)
@@ -34,125 +39,131 @@ fun ThreadFactory.singleThreadExecutor(): ExecutorService = Executors.newSingleT
  * @author Aljan Porquillo
  */
 class ProducerRecordRetryManager<O>(
-  properties: Properties,
-  private val kafkaProducer: KafkaProducer<String, O>,
-  private val topicName: String,
-  private val adminClient: KafkaAdminClient = KafkaAdminClient.getInstance(properties),
-  private val recordQueue: BlockingQueue<ProducerRecord<String, O>> = properties.newBlockingMechanism(),
-  private val threadFactory: ThreadFactory = topicName.toKafkaDaemonThreadFactory(),
-  private val retryTaskExecutor: ExecutorService = threadFactory.singleThreadExecutor()
-): KafkaDispatcherCallback<O> {
+	properties: Properties,
+	private val kafkaProducer: KafkaProducer<String, O>,
+	private val topicName: String,
+	private val adminClient: KafkaAdminClient = KafkaAdminClient.getInstance(properties),
+	private val recordQueue: BlockingQueue<ProducerRecord<String, O>> = properties.newBlockingMechanism(),
+	private val threadFactory: ThreadFactory = topicName.toKafkaDaemonThreadFactory(),
+	private val retryTaskExecutor: ExecutorService = threadFactory.singleThreadExecutor()
+) : KafkaDispatcherCallback<O> {
 
-  private val logger = logger()
+	private val logger = logger()
 
-  private var callback: KafkaDispatcherCallback<O>? = null
-  private var hasOngoingRetry = false
-  private var retryTaskFuture: CompletableFuture<Void>? = null
+	private var callback: KafkaDispatcherCallback<O>? = null
+	private var hasOngoingRetry = false
+	private var retryTaskFuture: CompletableFuture<Void>? = null
 
-  private var internalDispatcherCallback: () -> Unit = {}
+	private var internalDispatcherCallback: () -> Unit = {}
 
-  override fun onDispatch(response: KafkaDispatcherResponse<O>) {
-    when (response.state()) {
-      KafkaDispatcherResponse.State.SUCCESS,
-      KafkaDispatcherResponse.State.FAILURE,
-      KafkaDispatcherResponse.State.RETRY -> {
-        callback?.onDispatch(response)
-      }
-      KafkaDispatcherResponse.State.POLLED -> internalDispatcherCallback.invoke()
-    }
-    if (response.state() == KafkaDispatcherResponse.State.SUCCESS) {
-      logger.debug(buildString {
-        append("Record written: ${response.payload} to offset ")
-        append("${response.metadata?.offset()} timestamp ${response.metadata?.timestamp()}")
-      })
-    }
-  }
+	override fun onDispatch(response: KafkaDispatcherResponse<O>) {
+		when (response.state()) {
+			KafkaDispatcherResponse.State.SUCCESS,
+			KafkaDispatcherResponse.State.FAILURE,
+			KafkaDispatcherResponse.State.RETRY -> {
+				callback?.onDispatch(response)
+			}
 
-  fun setCompleteListener(dispatchListener: () -> Unit) {
-    this.internalDispatcherCallback = dispatchListener
-  }
+			KafkaDispatcherResponse.State.POLLED -> internalDispatcherCallback.invoke()
+		}
+		if (response.state() == KafkaDispatcherResponse.State.SUCCESS) {
+			logger.debug(buildString {
+				append("Record written: ${response.payload} to offset ")
+				append("${response.metadata?.offset()} timestamp ${response.metadata?.timestamp()}")
+			})
+		}
+	}
 
-  fun setDispatcherCallback(callback: KafkaDispatcherCallback<O>) {
-    this.callback = callback
-  }
+	fun setCompleteListener(dispatchListener: () -> Unit) {
+		this.internalDispatcherCallback = dispatchListener
+	}
 
-  fun queueFailedRecord(
-    exception: Exception,
-    record: ProducerRecord<String, O>,
-    idUpdater: EventCorrelationIdUpdater<O>
-  ) {
-    if (exception !is TimeoutException) {
-      return
-    }
-    enqueueToBucket(record, idUpdater)
-    ensureRetryTaskIsRunning(idUpdater)
-  }
+	fun setDispatcherCallback(callback: KafkaDispatcherCallback<O>) {
+		this.callback = callback
+	}
 
-  private fun enqueueToBucket(
-    record: ProducerRecord<String, O>,
-    idUpdater: EventCorrelationIdUpdater<O>
-  ) {
-    logger.debug("Putting $record in the queue for retry once the Kafka broker becomes available")
+	fun queueFailedRecord(
+		exception: Exception,
+		record: ProducerRecord<String, O>,
+		idUpdater: EventCorrelationIdUpdater<O>
+	) {
+		if (exception !is TimeoutException) {
+			return
+		}
+		enqueueToBucket(record, idUpdater)
+		ensureRetryTaskIsRunning(idUpdater)
+	}
 
-    // request to update eventId for current record since
-    // we will be pushing new event to the Audit report.
-    logger.debug("Requesting correlation id update...")
-    idUpdater.requestUpdate(record.value())
-    val builder = KafkaDispatcherResponse.Builder<O>()
-      .setKey(record.key())
-      .setPayload(record.value())
-      .setException(NoAvailableBrokersException())
-      .setState(KafkaDispatcherResponse.State.RETRY)
+	private fun enqueueToBucket(
+		record: ProducerRecord<String, O>,
+		idUpdater: EventCorrelationIdUpdater<O>
+	) {
+		logger.debug("Putting $record in the queue for retry once the Kafka broker becomes available")
 
-    // dispatch with retry state
-    callback?.onDispatch(builder.build())
-    recordQueue.put(record)
-  }
+		// request to update eventId for current record since
+		// we will be pushing new event to the Audit report.
+		logger.debug("Requesting correlation id update...")
+		idUpdater.requestUpdate(record.value())
+		val builder = KafkaDispatcherResponse.Builder<O>()
+			.setKey(record.key())
+			.setPayload(record.value())
+			.setException(NoAvailableBrokersException())
+			.setState(KafkaDispatcherResponse.State.RETRY)
 
-  private fun ensureRetryTaskIsRunning(idUpdater: EventCorrelationIdUpdater<O>): CompletableFuture<Void> {
-    logger.debug("RetryFailedRecordsTask state: ${if (hasOngoingRetry) "RUNNING" else "IDLE"}")
-    if (hasOngoingRetry) {
-      return retryTaskFuture.getOrComplete()
-    }
-    logger.debug("RetryFailedRecordsTask state: STARTING")
-    hasOngoingRetry = true
-    val retryRecordTask: Runnable = createRetryTask()
-      .withEventCorrelationIdUpdater(idUpdater)
-      .build()
-    retryTaskFuture = executeRetryFailedRecordsTask(retryRecordTask)
-    return retryTaskFuture.getOrComplete()
-  }
+		// dispatch with retry state
+		callback?.onDispatch(builder.build())
+		recordQueue.put(record)
+	}
 
-  private fun executeRetryFailedRecordsTask(retryRecordTask: Runnable): CompletableFuture<Void> {
-    // execute the task asynchronously to avoid blocking the current producer handle
-    logger.debug("$retryRecordTask started")
-    return CompletableFuture.runAsync(retryRecordTask, retryTaskExecutor)
-      .thenRun {
-        logger.debug("$retryRecordTask state: COMPLETED. Resetting to the initial retry state: IDLE")
-        hasOngoingRetry = false
-      }
-  }
+	private fun ensureRetryTaskIsRunning(idUpdater: EventCorrelationIdUpdater<O>): CompletableFuture<Void> {
+		logger.debug("RetryFailedRecordsTask state: ${if (hasOngoingRetry) "RUNNING" else "IDLE"}")
+		if (hasOngoingRetry) {
+			return retryTaskFuture.getOrComplete()
+		}
+		logger.debug("RetryFailedRecordsTask state: STARTING")
+		hasOngoingRetry = true
+		val retryRecordTask: Runnable = createRetryTask()
+			.withEventCorrelationIdUpdater(idUpdater)
+			.build()
+		retryTaskFuture = executeRetryFailedRecordsTask(retryRecordTask)
+		return retryTaskFuture.getOrComplete()
+	}
 
-  private fun createRetryTask(): RetryFailedRecordsTask.Builder<O> {
-    return RetryFailedRecordsTask.Builder<O>()
-      .withProducerHandle(kafkaProducer)
-      .withAdminClient(adminClient)
-      .withRecordQueue(recordQueue)
-      .withTopicName(topicName)
-      .withDispatcherCallback(this)
-  }
+	private fun executeRetryFailedRecordsTask(retryRecordTask: Runnable): CompletableFuture<Void> {
+		// execute the task asynchronously to avoid blocking the current producer handle
+		logger.debug("$retryRecordTask started")
+		return CompletableFuture.runAsync(retryRecordTask, retryTaskExecutor)
+			.thenRun {
+				logger.debug("$retryRecordTask state: COMPLETED. Resetting to the initial retry state: IDLE")
+				hasOngoingRetry = false
+			}
+	}
 
-  fun tryNotifyPendingRecords(record: ProducerRecord<String, O>, idUpdater: EventCorrelationIdUpdater<O>): Boolean {
-    if (hasOngoingRetry) {
-      enqueueToBucket(record, idUpdater)
-      logger.debug("Notifying pending records to resend from a topic: $topicName, " +
-          "record old size: ${recordQueue.size - 1}, new size ${recordQueue.size}")
-      return false
-    }
-    return true
-  }
+	private fun createRetryTask(): RetryFailedRecordsTask.Builder<O> {
+		return RetryFailedRecordsTask.Builder<O>()
+			.withProducerHandle(kafkaProducer)
+			.withAdminClient(adminClient)
+			.withRecordQueue(recordQueue)
+			.withTopicName(topicName)
+			.withDispatcherCallback(this)
+	}
 
-  private fun CompletableFuture<Void>?.getOrComplete(): CompletableFuture<Void> {
-    return this ?: CompletableFuture.completedFuture(null)
-  }
+	fun tryNotifyPendingRecords(
+		record: ProducerRecord<String, O>,
+		idUpdater: EventCorrelationIdUpdater<O>
+	): Boolean {
+		if (hasOngoingRetry) {
+			enqueueToBucket(record, idUpdater)
+			logger.debug(
+				"Notifying pending records to resend from a topic: $topicName, " +
+						"record old size: ${recordQueue.size - 1}, new size ${recordQueue.size}"
+			)
+			return false
+		}
+		return true
+	}
+
+	private fun CompletableFuture<Void>?.getOrComplete(): CompletableFuture<Void> {
+		return this ?: CompletableFuture.completedFuture(null)
+	}
 }
