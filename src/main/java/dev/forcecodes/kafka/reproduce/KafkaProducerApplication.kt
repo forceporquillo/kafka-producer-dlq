@@ -7,8 +7,10 @@ import java.io.FileInputStream
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Paths
-import java.util.*
+import java.util.Properties
+import java.util.UUID
 import java.util.concurrent.ExecutionException
+import kotlin.system.exitProcess
 
 /**
  * A sample simulation where a [KafkaProducer] encounters an error while sending a message.
@@ -44,8 +46,8 @@ object KafkaProducerApplication {
     return envProps
   }
 
-  private fun KafkaProducer<String, MockData>.trySend(
-    record: ProducerRecord<String, MockData>,
+  private fun KafkaProducer<String, RecordData>.trySend(
+    record: ProducerRecord<String, RecordData>,
     onError: (Exception) -> Unit
   ) {
     try {
@@ -72,11 +74,19 @@ object KafkaProducerApplication {
       )
     }
 
-    val props = loadProperties("config/dev.properties")
+    val props = loadProperties(args[0])
     val topic = args[2]
 
-    val producer = KafkaProducer<String, MockData>(props)
+    val producer = KafkaProducer<String, RecordData>(props)
     val retryManager = ProducerRecordRetryManager(props, producer, topic)
+
+    logger.debug("properties: $props")
+    logger.debug("topic: $topic")
+
+    retryManager.setDispatchListener {
+      logger.debug("All records has been successfully re-send to topic, closing program...")
+      exitProcess(1)
+    }
 
     retryManager.setCallback {
       logger.debug("Callback: $it")
@@ -89,36 +99,40 @@ object KafkaProducerApplication {
         logger.debug("Record to send $record")
 
         val proceedToSend = retryManager.tryNotifyPendingRecords(record) {
-          val value = UUID.randomUUID().toString()
-          it.append = value
-          logger.debug("NotifyPending: Consuming correlation updater callback : $it with update message $value")
+          onUpdateCorrelationId(record.value(), "NotifyPendingRecords")
         }
 
         if (proceedToSend) {
           producer.trySend(record) { exception ->
             // potential cause for this exception would be kafka broker is not running
             retryManager.queueFailedRecord(exception, record) {
-              val value = UUID.randomUUID().toString()
-              it.append = value
-              logger.debug("Consuming correlation updater callback: $it with update message $value")
+              onUpdateCorrelationId(record.value(), "FailedRecords")
             }
           }
         }
       }
   }
 
-  private fun String.toRecord(topic: String): ProducerRecord<String, MockData> {
+  private fun onUpdateCorrelationId(recordData: RecordData, callSite: String) {
+    logger.debug("Old correlation id ${recordData.correlationId}")
+    val correlationId = UUID.randomUUID().toString()
+    recordData.correlationId = correlationId
+    logger.debug("New correlation id $correlationId")
+    logger.debug("$callSite: Consuming correlation updater callback : $recordData with update message $correlationId")
+  }
+
+  private fun String.toRecord(topic: String): ProducerRecord<String, RecordData> {
     val parts = split("\\.".toRegex()).dropLastWhile { it.isEmpty() }.toTypedArray()
+    val id = UUID.randomUUID().toString()
     return if (parts.size > 1) {
-      ProducerRecord(topic, parts[0], MockData(parts[1].trim()))
+      ProducerRecord(topic, parts[0], RecordData(parts[1].trim(), correlationId = id))
     } else {
-      ProducerRecord(topic, UUID.randomUUID().toString(), MockData(this))
+      ProducerRecord(topic, id, RecordData(this, correlationId = id))
     }
   }
 
   @JvmStatic
   fun main(args: Array<String>) {
     kafkaProducer(args)
-    Thread.currentThread().join()
   }
 }

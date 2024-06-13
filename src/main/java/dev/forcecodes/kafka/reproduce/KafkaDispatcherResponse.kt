@@ -4,7 +4,7 @@ import org.apache.kafka.clients.producer.RecordMetadata
 
 class KafkaDispatcherResponse<T> private constructor(
   val key: String?,
-  val payload: T,
+  val payload: T?,
   val metadata: RecordMetadata?,
   val exception: Exception?,
   private val state: State? = null
@@ -13,8 +13,8 @@ class KafkaDispatcherResponse<T> private constructor(
   enum class State(val key: String) {
     SUCCESS("sent"),
     FAILURE("fail"),
-    RETRY("retry")
-
+    RETRY("retry"),
+    POLLED("polled")
   }
 
   // Builder class
@@ -52,7 +52,7 @@ class KafkaDispatcherResponse<T> private constructor(
     }
 
     fun build(): KafkaDispatcherResponse<T> {
-      return KafkaDispatcherResponse(key, payload!!, metadata, exception, state)
+      return KafkaDispatcherResponse(key, payload, metadata, exception, state)
     }
   }
 

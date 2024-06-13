@@ -5,13 +5,14 @@ import org.apache.kafka.clients.producer.ProducerRecord
 import org.apache.kafka.clients.producer.RecordMetadata
 import org.apache.logging.log4j.kotlin.logger
 import java.util.*
+import java.util.concurrent.BlockingQueue
 
 class RetryFailedRecordsTask<O>(builder: Builder<O>) : Runnable {
 
   private val logger = logger()
 
   private val correlationIdUpdater: EventCorrelationIdUpdater<O>?
-  private val recordQueue: Queue<ProducerRecord<String, O>>?
+  private val recordQueue: BlockingQueue<ProducerRecord<String, O>>?
   private val adminClient: KafkaAdminClient?
   private val topicName: String?
   private val producerHandle: KafkaProducer<String, O>?
@@ -53,23 +54,27 @@ class RetryFailedRecordsTask<O>(builder: Builder<O>) : Runnable {
 
   private fun processRecordsFromDlq() {
     try {
+      var builder: KafkaDispatcherResponse.Builder<O>
       while (recordQueue?.isNotEmpty() == true) {
-        val record = recordQueue.poll()
+        val record = recordQueue.take()
         correlationIdUpdater?.requestUpdate(record.value())
-        val builder = KafkaDispatcherResponse.Builder<O>()
+        builder = KafkaDispatcherResponse.Builder<O>()
         builder.setKey(record.key()).setPayload(record.value())
-        producerHandle?.send(record) { recordMetadata: RecordMetadata?, exception: Exception? ->
+        producerHandle?.send(record) { recordMetadata, exception ->
           // dispatch only when Kafka broker acknowledges the message
           dispatcherCallback?.apply {
             if (exception == null) {
               onDispatch(
-                builder.setMetadata(recordMetadata).setState(KafkaDispatcherResponse.State.SUCCESS)
+                builder.setMetadata(recordMetadata)
+                  .setState(KafkaDispatcherResponse.State.SUCCESS)
                   .build()
               )
             }
           }
         }?.get() // block thread
       }
+      builder = KafkaDispatcherResponse.Builder<O>().setState(KafkaDispatcherResponse.State.POLLED)
+      dispatcherCallback?.onDispatch(builder.build())
     } catch (e: Exception) {
       logger.error(e)
     }
@@ -82,14 +87,14 @@ class RetryFailedRecordsTask<O>(builder: Builder<O>) : Runnable {
 
   class Builder<O> {
 
-    var recordQueue: Queue<ProducerRecord<String, O>>? = null
+    var recordQueue: BlockingQueue<ProducerRecord<String, O>>? = null
     var adminClient: KafkaAdminClient? = null
     var topicName: String? = null
     var producerHandle: KafkaProducer<String, O>? = null
     var dispatcherCallback: KafkaDispatcherCallback<O>? = null
     var correlationIdUpdater: EventCorrelationIdUpdater<O>? = null
 
-    fun withRecordQueue(recordQueue: Queue<ProducerRecord<String, O>>?): Builder<O> {
+    fun withRecordQueue(recordQueue: BlockingQueue<ProducerRecord<String, O>>?): Builder<O> {
       this.recordQueue = recordQueue
       return this
     }

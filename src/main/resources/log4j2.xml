@@ -3,7 +3,7 @@
   <Appenders>
     <Console name="Console">
       <PatternLayout>
-        <Pattern>%d{yyyy-MM-dd HH:mm:ss} %-5p %c{1} - %m%n</Pattern>
+        <Pattern>%d{yyyy-MM-dd HH:mm:ss} %-5p [%t] %c{1} - %m%n</Pattern>
       </PatternLayout>
     </Console>
   </Appenders>
@@ -14,7 +14,7 @@
     <Logger name="org.apache.kafka" level="ERROR">
       <AppenderRef ref="Console"/>
     </Logger>
-    <Root level="INFO">
+    <Root level="DEBUG">
       <AppenderRef ref="Console"/>
     </Root>
   </Loggers>
