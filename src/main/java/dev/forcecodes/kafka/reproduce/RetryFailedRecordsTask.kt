@@ -2,9 +2,7 @@ package dev.forcecodes.kafka.reproduce
 
 import org.apache.kafka.clients.producer.KafkaProducer
 import org.apache.kafka.clients.producer.ProducerRecord
-import org.apache.kafka.clients.producer.RecordMetadata
 import org.apache.logging.log4j.kotlin.logger
-import java.util.*
 import java.util.concurrent.BlockingQueue
 
 class RetryFailedRecordsTask<O>(builder: Builder<O>) : Runnable {
@@ -36,7 +34,7 @@ class RetryFailedRecordsTask<O>(builder: Builder<O>) : Runnable {
       logger.debug(
         "There are at least ${recordQueue.size} " +
             "${if (recordQueue.size > 1) "messages" else "message"} in the queue record bucket. " +
-            "Will attempt to re-schedule processing all records to the $topicName topic " +
+            "Will attempt to re-schedule processing all records to the [$topicName] topic " +
             "once broker became available",
       )
       val isAvailable = adminClient?.getAvailableTopics(true) { topics ->
@@ -55,23 +53,26 @@ class RetryFailedRecordsTask<O>(builder: Builder<O>) : Runnable {
   private fun processRecordsFromDlq() {
     try {
       var builder: KafkaDispatcherResponse.Builder<O>
-      while (recordQueue?.isNotEmpty() == true) {
-        val record = recordQueue.take()
-        correlationIdUpdater?.requestUpdate(record.value())
-        builder = KafkaDispatcherResponse.Builder<O>()
-        builder.setKey(record.key()).setPayload(record.value())
-        producerHandle?.send(record) { recordMetadata, exception ->
-          // dispatch only when Kafka broker acknowledges the message
-          dispatcherCallback?.apply {
-            if (exception == null) {
-              onDispatch(
-                builder.setMetadata(recordMetadata)
-                  .setState(KafkaDispatcherResponse.State.SUCCESS)
-                  .build()
-              )
+      recordQueue?.let { queue ->
+        while (queue.isNotEmpty()) {
+          val record = queue.take()
+          correlationIdUpdater?.requestUpdate(record.value())
+          builder = KafkaDispatcherResponse.Builder<O>()
+            .setKey(record.key())
+            .setPayload(record.value())
+          producerHandle?.send(record) { recordMetadata, exception ->
+            // dispatch only when Kafka broker acknowledges the message
+            dispatcherCallback?.apply {
+              if (exception == null) {
+                onDispatch(
+                  builder.setMetadata(recordMetadata)
+                    .setState(KafkaDispatcherResponse.State.SUCCESS)
+                    .build()
+                )
+              }
             }
-          }
-        }?.get() // block thread
+          }?.get() // block thread
+        }
       }
       builder = KafkaDispatcherResponse.Builder<O>().setState(KafkaDispatcherResponse.State.POLLED)
       dispatcherCallback?.onDispatch(builder.build())
@@ -99,22 +100,22 @@ class RetryFailedRecordsTask<O>(builder: Builder<O>) : Runnable {
       return this
     }
 
-    fun withAdminClient(adminClient: KafkaAdminClient?): Builder<O> {
+    fun withAdminClient(adminClient: KafkaAdminClient): Builder<O> {
       this.adminClient = adminClient
       return this
     }
 
-    fun withTopicName(topicName: String?): Builder<O> {
+    fun withTopicName(topicName: String): Builder<O> {
       this.topicName = topicName
       return this
     }
 
-    fun withProducerHandle(producerHandle: KafkaProducer<String, O>?): Builder<O> {
+    fun withProducerHandle(producerHandle: KafkaProducer<String, O>): Builder<O> {
       this.producerHandle = producerHandle
       return this
     }
 
-    fun withDispatcherCallback(dispatcherCallback: KafkaDispatcherCallback<O>?): Builder<O> {
+    fun withDispatcherCallback(dispatcherCallback: KafkaDispatcherCallback<O>): Builder<O> {
       this.dispatcherCallback = dispatcherCallback
       return this
     }

@@ -5,10 +5,8 @@ package dev.forcecodes.kafka.reproduce
 import org.apache.kafka.clients.admin.AdminClient
 import org.apache.kafka.clients.admin.ListTopicsOptions
 import org.apache.logging.log4j.kotlin.logger
-import org.slf4j.LoggerFactory
-import java.util.*
+import java.util.Properties
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.ExecutionException
 import java.util.stream.Collectors
 
 class KafkaAdminClient private constructor(
@@ -63,6 +61,12 @@ class KafkaAdminClient private constructor(
 
     private val INSTANCE_MAP = ConcurrentHashMap<String, KafkaAdminClient>()
 
+    private val Properties.listingTimeout: Int
+      get() {
+        val timeout = getOrDefault("listingTimeout", DEFAULT_TOPIC_LISTING_TIMEOUT_MS.toString()) as String
+        return timeout.toInt()
+      }
+
     @JvmStatic
     @Synchronized
     fun getInstance(config: Properties): KafkaAdminClient {
@@ -71,7 +75,7 @@ class KafkaAdminClient private constructor(
       ) {
         KafkaAdminClient(
           config,
-          DEFAULT_TOPIC_LISTING_TIMEOUT_MS
+          config.listingTimeout
         )
       }
     }

@@ -8,7 +8,8 @@ import java.io.FileInputStream
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Paths
-import java.util.*
+import java.util.Properties
+import java.util.UUID
 import java.util.concurrent.ExecutionException
 import kotlin.system.exitProcess
 
@@ -116,6 +117,7 @@ object KafkaProducerApplication {
 						},
 						onError = { exception ->
 							// potential cause for this exception would be kafka broker is not running
+							logger.error("Failed to send $record", exception)
 							retryManager.queueFailedRecord(exception, record, idUpdater)
 						})
 				}
@@ -135,5 +137,6 @@ object KafkaProducerApplication {
 	@JvmStatic
 	fun main(args: Array<String>) {
 		kafkaProducer(args)
+		Thread.currentThread().join()
 	}
 }
