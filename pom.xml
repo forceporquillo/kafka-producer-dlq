@@ -13,7 +13,7 @@
     <maven.compiler.target>11</maven.compiler.target>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <kotlin.version>1.9.22</kotlin.version>
-    <kafka.version>3.5.1</kafka.version>
+    <kafka.version>3.7.1</kafka.version>
     <log4j2.version>2.23.0</log4j2.version>
     <log4j2.kotlin.version>1.4.0</log4j2.kotlin.version>
     <main.class>dev.forcecodes.kafka.reproduce.KafkaProducerApplicationKt</main.class>
